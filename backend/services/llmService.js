@@ -14,29 +14,38 @@ Rules:
 5. If the patient's reply is vague, ask a natural follow-up.
 6. Once complete, wrap up politely.
 7. This is a screening tool only, not a diagnosis — if the patient describes symptoms that sound urgent or severe, advise them to seek immediate in-person medical care.
+8. Respond with ONLY the message for the patient. Do NOT write any thinking process or use tags.
 `;
 
-// Groq's gpt-oss models occasionally misclassify a normal text reply as a
-// tool call attempt (a known "harmony format" parsing bug on their end).
-// When that happens, the model's actual answer is still embedded in the
-// error's failed_generation field — this pulls it back out.
+function cleanResponseText(text) {
+  if (typeof text !== "string") {
+    text = text ? String(text) : "";
+  }
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
 function extractTextFromFailedGeneration(failedGeneration) {
   if (!failedGeneration) return null;
-  const match = failedGeneration.match(/"arguments":\s*(.*)\}\s*$/s);
-  if (!match) return null;
-  let text = match[1].trim();
-  // Strip a wrapping quote if the model happened to produce one
-  if (text.startsWith('"') && text.endsWith('"')) {
-    text = text.slice(1, -1);
+
+  try {
+    const parsed = typeof failedGeneration === "string" ? JSON.parse(failedGeneration) : failedGeneration;
+    if (parsed?.message) return String(parsed.message);
+    if (parsed?.arguments) return typeof parsed.arguments === "string" ? parsed.arguments : JSON.stringify(parsed.arguments);
+  } catch (e) {}
+
+  const match = String(failedGeneration).match(/"(?:arguments|message)":\s*"?([^"}\n\r]+)"?/s);
+  if (match && match[1]) {
+    return match[1].trim();
   }
-  return text.trim() || null;
+
+  return String(failedGeneration).replace(/[{}\"]/g, "").trim() || null;
 }
 
 async function callGroq(model, messages) {
   return groq.chat.completions.create({
     model,
     messages,
-    max_tokens: 120,
+    max_tokens: 150,
     temperature: 0.6,
   });
 }
@@ -47,29 +56,33 @@ export async function getLLMResponse(conversationHistory) {
     ...conversationHistory,
   ];
 
+  // Aapke environment me supported models
   const models = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b"];
 
   for (let i = 0; i < models.length; i++) {
     try {
       const response = await callGroq(models[i], messages);
-      return response.choices[0].message.content;
+      const rawContent = response.choices[0]?.message?.content || "";
+      return cleanResponseText(rawContent);
     } catch (error) {
-      const failedGeneration = error?.error?.error?.failed_generation;
-      const code = error?.error?.error?.code;
+      const failedGen =
+        error?.error?.error?.failed_generation ||
+        error?.error?.failed_generation ||
+        error?.failed_generation;
 
-      if (code === "tool_use_failed" && failedGeneration) {
-        const recovered = extractTextFromFailedGeneration(failedGeneration);
+      const code = error?.error?.error?.code || error?.code;
+
+      if ((code === "tool_use_failed" || code === "output_parse_failed") && failedGen) {
+        const recovered = extractTextFromFailedGeneration(failedGen);
         if (recovered) {
-          console.warn(`LLM Service: recovered text after tool_use_failed glitch (model: ${models[i]})`);
-          return recovered;
+          console.warn(`LLM Service: recovered text after glitch (model: ${models[i]})`);
+          return cleanResponseText(recovered);
         }
       }
 
       console.error(`LLM Service Error (model: ${models[i]}):`, error?.message || error);
 
-      // Last model in the list — nothing left to fall back to
       if (i === models.length - 1) throw error;
-      // Otherwise fall through to try the next model
     }
   }
 }
