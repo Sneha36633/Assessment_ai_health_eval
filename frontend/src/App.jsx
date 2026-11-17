@@ -72,43 +72,75 @@ export default function App() {
     }
   };
 
-  const connectWebSocket = () => {
-    socketRef.current = new WebSocket("ws://localhost:3000");
-
-    socketRef.current.onopen = () => setStatus("Connected & System Ready");
-    socketRef.current.onerror = () => setStatus("Connection Error");
-
-    socketRef.current.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-
-        if (data.type === "AI_REPLY") {
-          setTranscript((prev) => [...prev, { role: "assistant", text: data.text }]);
-          speakText(data.text);
+  const connectWebSocket = (onOpen) => {
+    if (
+      socketRef.current &&
+      (socketRef.current.readyState === WebSocket.OPEN ||
+        socketRef.current.readyState === WebSocket.CONNECTING)
+    ) {
+      if (onOpen) {
+        if (socketRef.current.readyState === WebSocket.OPEN) {
+          onOpen();
+        } else {
+          socketRef.current.addEventListener("open", () => onOpen(), { once: true });
         }
-
-        if (data.type === "USER_TRANSCRIPT") {
-          setTranscript((prev) => [...prev, { role: "user", text: data.text }]);
-        }
-
-        if (data.type === "SILENCE_DETECTED") {
-          setStatus(data.text);
-          speakText(data.text);
-        }
-
-        if (data.type === "HEALTH_REPORT") {
-          setReport(data.report);
-          setAiSpeaking(false);
-          setStatus("Intake Session Concluded");
-        }
-
-        if (data.type === "ERROR") {
-          setStatus(data.message);
-        }
-      } catch (err) {
-        console.error("Message parsing error:", err);
       }
-    };
+      return;
+    }
+
+    try {
+      const ws = new WebSocket("ws://localhost:3000");
+      socketRef.current = ws;
+
+      ws.onopen = () => {
+        setStatus("Connected & System Ready");
+        if (onOpen) onOpen();
+      };
+
+      ws.onerror = (err) => {
+        console.error("WebSocket connection error:", err);
+        setStatus("Connection Error: Backend server offline (ws://localhost:3000)");
+      };
+
+      ws.onclose = () => {
+        setStatus("Disconnected from server");
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === "AI_REPLY") {
+            setTranscript((prev) => [...prev, { role: "assistant", text: data.text }]);
+            speakText(data.text);
+          }
+
+          if (data.type === "USER_TRANSCRIPT") {
+            setTranscript((prev) => [...prev, { role: "user", text: data.text }]);
+          }
+
+          if (data.type === "SILENCE_DETECTED") {
+            setStatus(data.text);
+            speakText(data.text);
+          }
+
+          if (data.type === "HEALTH_REPORT") {
+            setReport(data.report);
+            setAiSpeaking(false);
+            setStatus("Intake Session Concluded");
+          }
+
+          if (data.type === "ERROR") {
+            setStatus(data.message);
+          }
+        } catch (err) {
+          console.error("Message parsing error:", err);
+        }
+      };
+    } catch (err) {
+      console.error("Failed to initialize WebSocket:", err);
+      setStatus("Failed to connect to backend server");
+    }
   };
 
   useEffect(() => {
@@ -140,14 +172,22 @@ export default function App() {
   };
 
   const handleStartCall = () => {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) {
-      connectWebSocket();
-    }
     setTranscript([]);
     setReport(null);
     setCallActive(true);
     setStatus("Connecting Screening Call...");
-    socketRef.current.send(JSON.stringify({ type: "START_CALL" }));
+
+    const sendStart = () => {
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: "START_CALL" }));
+      }
+    };
+
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      sendStart();
+    } else {
+      connectWebSocket(sendStart);
+    }
   };
 
   const handleEndCall = () => {
@@ -156,7 +196,9 @@ export default function App() {
     setAiSpeaking(false);
     setCallActive(false);
     setStatus("Synthesizing Medical Intake Summary...");
-    socketRef.current.send(JSON.stringify({ type: "END_CALL" }));
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: "END_CALL" }));
+    }
   };
 
   // Instant Start Recording
