@@ -33,7 +33,7 @@ export async function generateHealthReport(conversationHistory) {
     ...conversationHistory,
   ];
 
-  const models = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b"];
+  const models = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 
   for (let i = 0; i < models.length; i++) {
     try {

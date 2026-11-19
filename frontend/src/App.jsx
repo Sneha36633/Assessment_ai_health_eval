@@ -12,6 +12,8 @@ import {
   Stethoscope,
   Radio,
   ClipboardList,
+  Send,
+  Volume2,
 } from "lucide-react";
 
 export default function App() {
@@ -21,54 +23,93 @@ export default function App() {
   const [status, setStatus] = useState("Standby");
   const [transcript, setTranscript] = useState([]);
   const [report, setReport] = useState(null);
+  const [inputText, setInputText] = useState("");
 
   const socketRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const streamRef = useRef(null);
   const isRecordingRef = useRef(false);
+  const isStartingRecordingRef = useRef(false);
   const transcriptEndRef = useRef(null);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript]);
 
-  // Robust, Non-Blocking Speech Synthesis
+  // Preload and ensure speech synthesis voices are ready
+  useEffect(() => {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.getVoices();
+      };
+    }
+  }, []);
+
+  // Robust, Non-Blocking Speech Synthesis with Chromium race-condition fix
   const speakText = (text) => {
     if (!text || text.trim().length === 0) return;
 
     if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch (e) {}
 
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "en-US";
-      utterance.rate = 1.05;
-      utterance.pitch = 1.0;
+      // 50ms delay prevents Chrome audio engine from cancelling the newly queued utterance
+      setTimeout(() => {
+        try {
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.lang = "en-US";
+          utterance.rate = 1.0;
+          utterance.pitch = 1.0;
 
-      window.activeUtterance = utterance;
+          const voices = window.speechSynthesis.getVoices();
+          if (voices && voices.length > 0) {
+            const preferredVoice =
+              voices.find(
+                (v) =>
+                  v.lang.startsWith("en") &&
+                  (v.name.includes("Natural") ||
+                    v.name.includes("Google") ||
+                    v.name.includes("Samantha") ||
+                    v.name.includes("David") ||
+                    v.name.includes("Zira"))
+              ) || voices.find((v) => v.lang.startsWith("en"));
 
-      utterance.onstart = () => {
-        setAiSpeaking(true);
-        setStatus("AI Intake Agent is Speaking...");
-      };
+            if (preferredVoice) utterance.voice = preferredVoice;
+          }
 
-      utterance.onend = () => {
-        setAiSpeaking(false);
-        setStatus("Your Turn: Tap or Hold to Speak");
-        window.activeUtterance = null;
-      };
+          window.activeUtterance = utterance;
 
-      utterance.onerror = () => {
-        setAiSpeaking(false);
-        setStatus("Ready for Voice Input");
-        window.activeUtterance = null;
-      };
+          utterance.onstart = () => {
+            setAiSpeaking(true);
+            setStatus("AI Intake Agent is Speaking...");
+          };
 
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
+          utterance.onend = () => {
+            setAiSpeaking(false);
+            setStatus("Your Turn: Tap Mic to Speak or Type below");
+            window.activeUtterance = null;
+          };
 
-      window.speechSynthesis.speak(utterance);
+          utterance.onerror = (e) => {
+            console.warn("Speech synthesis notice:", e);
+            setAiSpeaking(false);
+            setStatus("Ready for Voice or Text Input");
+            window.activeUtterance = null;
+          };
+
+          if (window.speechSynthesis.paused) {
+            window.speechSynthesis.resume();
+          }
+
+          window.speechSynthesis.speak(utterance);
+        } catch (err) {
+          console.error("SpeechSynthesis error:", err);
+          setAiSpeaking(false);
+        }
+      }, 50);
     }
   };
 
@@ -172,6 +213,11 @@ export default function App() {
   };
 
   const handleStartCall = () => {
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.resume();
+      } catch (e) {}
+    }
     setTranscript([]);
     setReport(null);
     setCallActive(true);
@@ -201,12 +247,17 @@ export default function App() {
     }
   };
 
-  // Instant Start Recording
+  // Robust Recording Handling (supports both toggle and hold)
   const startRecording = async (e) => {
-    if (e) e.preventDefault();
-    if (isRecordingRef.current) return;
+    if (e && e.preventDefault) e.preventDefault();
+    if (isRecordingRef.current || isStartingRecordingRef.current) return;
 
-    window.speechSynthesis.cancel();
+    isStartingRecordingRef.current = true;
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch (err) {}
+    }
     setAiSpeaking(false);
 
     try {
@@ -229,7 +280,10 @@ export default function App() {
       };
 
       recorder.onstop = () => {
-        if (audioChunksRef.current.length === 0) return;
+        if (audioChunksRef.current.length === 0) {
+          cleanupMedia();
+          return;
+        }
 
         const audioBlob = new Blob(audioChunksRef.current, {
           type: recorder.mimeType || "audio/webm",
@@ -252,26 +306,58 @@ export default function App() {
         cleanupMedia();
       };
 
-      // 200ms slice ensures audio is buffered smoothly
-      recorder.start(200);
+      // 100ms slice ensures early availability of audio chunks
+      recorder.start(100);
       isRecordingRef.current = true;
       setIsRecording(true);
-      setStatus("Recording your voice... (Release to send)");
+      setStatus("Recording your voice... (Tap again to send)");
     } catch (err) {
       console.error("Mic error:", err);
-      setStatus("Microphone permission denied");
+      setStatus("Microphone permission denied / unavailable");
+    } finally {
+      isStartingRecordingRef.current = false;
     }
   };
 
   // Instant Stop Recording
   const stopRecording = (e) => {
-    if (e) e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     if (mediaRecorderRef.current && isRecordingRef.current) {
       isRecordingRef.current = false;
       setIsRecording(false);
       if (mediaRecorderRef.current.state !== "inactive") {
         mediaRecorderRef.current.stop();
       }
+    }
+  };
+
+  const toggleRecording = () => {
+    if (isRecordingRef.current) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  };
+
+  const handleSendText = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const trimmed = inputText.trim();
+    if (!trimmed) return;
+
+    if (!callActive) {
+      setCallActive(true);
+    }
+
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: "USER_TEXT", text: trimmed }));
+      setInputText("");
+      setStatus("Analyzing symptoms with AI...");
+    } else {
+      connectWebSocket(() => {
+        socketRef.current.send(JSON.stringify({ type: "USER_TEXT", text: trimmed }));
+        setInputText("");
+        setStatus("Analyzing symptoms with AI...");
+      });
     }
   };
 
@@ -374,18 +460,17 @@ export default function App() {
             </button>
           ) : (
             <div className="flex items-center gap-4">
-              {/* Ultra-Responsive Hold Button */}
+              {/* Responsive Click-to-Speak Button */}
               <button
-                onMouseDown={startRecording}
-                onTouchStart={startRecording}
+                onClick={toggleRecording}
                 className={`flex items-center gap-3 px-8 py-3.5 rounded-2xl font-semibold select-none transition-all duration-150 active:scale-95 cursor-pointer border ${
                   isRecording
-                    ? "bg-rose-600 text-white shadow-xl shadow-rose-950 border-rose-400/40 ring-4 ring-rose-500/20"
+                    ? "bg-rose-600 hover:bg-rose-500 text-white shadow-xl shadow-rose-950 border-rose-400/40 ring-4 ring-rose-500/20"
                     : "bg-slate-800/90 hover:bg-slate-700 text-slate-100 border-slate-700 shadow-lg active:bg-slate-700"
                 }`}
               >
                 <Mic className={`w-5 h-5 ${isRecording ? "animate-bounce text-white" : "text-teal-400"}`} />
-                <span>{isRecording ? "Listening... (Release anywhere)" : "Hold to Talk"}</span>
+                <span>{isRecording ? "Listening... (Tap to Send)" : "Tap to Speak"}</span>
               </button>
 
               <button
@@ -427,19 +512,52 @@ export default function App() {
                       : "bg-teal-950/40 border border-teal-800/40 text-teal-100 mr-2 ml-6 text-right rounded-tr-sm"
                   }`}
                 >
-                  <p
-                    className={`text-[10px] font-bold uppercase tracking-wider mb-1 ${
-                      msg.role === "assistant" ? "text-teal-400" : "text-slate-400"
-                    }`}
-                  >
-                    {msg.role === "assistant" ? "AI Intake Agent" : "Patient"}
-                  </p>
+                  <div className="flex items-center justify-between mb-1">
+                    <p
+                      className={`text-[10px] font-bold uppercase tracking-wider ${
+                        msg.role === "assistant" ? "text-teal-400" : "text-slate-400"
+                      }`}
+                    >
+                      {msg.role === "assistant" ? "AI Intake Agent" : "Patient"}
+                    </p>
+                    {msg.role === "assistant" && (
+                      <button
+                        type="button"
+                        onClick={() => speakText(msg.text)}
+                        title="Replay Voice"
+                        className="p-1 hover:text-teal-300 text-teal-400/70 hover:bg-teal-500/10 rounded-lg transition-colors cursor-pointer"
+                      >
+                        <Volume2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
                   {msg.text}
                 </div>
               ))
             )}
             <div ref={transcriptEndRef} />
           </div>
+
+          {/* Text Input Fallback */}
+          {callActive && (
+            <form onSubmit={handleSendText} className="mt-3 pt-3 border-t border-slate-800/80 flex items-center gap-2">
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Or type here (e.g. 2 din se tez sar dard hai)..."
+                className="flex-1 bg-slate-800/80 border border-slate-700/80 text-sm text-slate-100 rounded-xl px-3.5 py-2.5 focus:outline-none focus:border-teal-500 placeholder:text-slate-500 transition-colors"
+              />
+              <button
+                type="submit"
+                disabled={!inputText.trim()}
+                className="bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white p-2.5 rounded-xl transition-all active:scale-95 cursor-pointer shadow-md shadow-teal-950/40"
+                title="Send Text Message"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </form>
+          )}
         </div>
 
         {/* Right: Structured Clinical Doctor Report */}

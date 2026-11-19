@@ -45,7 +45,7 @@ async function callGroq(model, messages) {
   return groq.chat.completions.create({
     model,
     messages,
-    max_tokens: 150,
+    max_tokens: 300,
     temperature: 0.6,
   });
 }
@@ -56,14 +56,19 @@ export async function getLLMResponse(conversationHistory) {
     ...conversationHistory,
   ];
 
-  // Aapke environment me supported models
-  const models = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b"];
+  // Prioritize fast, direct-generation model with fallbacks
+  const models = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 
   for (let i = 0; i < models.length; i++) {
     try {
       const response = await callGroq(models[i], messages);
       const rawContent = response.choices[0]?.message?.content || "";
-      return cleanResponseText(rawContent);
+      const cleaned = cleanResponseText(rawContent);
+
+      if (cleaned && cleaned.length > 0) {
+        return cleaned;
+      }
+      console.warn(`LLM Service: model ${models[i]} returned empty content, trying fallback...`);
     } catch (error) {
       const failedGen =
         error?.error?.error?.failed_generation ||

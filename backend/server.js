@@ -38,7 +38,17 @@ wss.on("connection", (ws) => {
 
       // Voice Turn Handle Karna
       if (data.type === "USER_AUDIO") {
-        const userText = await transcribeAudio(data.audio);
+        let userText = "";
+        try {
+          userText = await transcribeAudio(data.audio);
+        } catch (sttErr) {
+          console.error("Audio Transcription Error:", sttErr?.message || sttErr);
+          ws.send(JSON.stringify({
+            type: "SILENCE_DETECTED",
+            text: "Could not process audio. Please try speaking again or use text input.",
+          }));
+          return;
+        }
 
         if (!userText || userText.trim().length === 0) {
           ws.send(JSON.stringify({
@@ -47,6 +57,23 @@ wss.on("connection", (ws) => {
           }));
           return;
         }
+
+        conversationHistory.push({ role: "user", content: userText });
+        ws.send(JSON.stringify({ type: "USER_TRANSCRIPT", text: userText }));
+
+        const aiReply = await getLLMResponse(conversationHistory);
+        conversationHistory.push({ role: "assistant", content: aiReply });
+
+        ws.send(JSON.stringify({
+          type: "AI_REPLY",
+          text: aiReply,
+        }));
+      }
+
+      // Text Message Turn Handle Karna
+      if (data.type === "USER_TEXT") {
+        const userText = data.text?.trim();
+        if (!userText) return;
 
         conversationHistory.push({ role: "user", content: userText });
         ws.send(JSON.stringify({ type: "USER_TRANSCRIPT", text: userText }));

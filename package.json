@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@tailwindcss/oxide-win32-x64-msvc": "^4.3.5"
+  }
+}
